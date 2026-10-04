@@ -861,7 +861,31 @@ internal fun buildFlatChatItems(
         // "Settled" is any terminal state. A streaming / pending / running call
         // stays listed: that is the one thing the user is watching.
         val summaryExpanded = message.id in expandedToolSummaries
-        val foldableToolIds: Set<String> = if (!collapseToolRuns || summaryExpanded) {
+        // [local #337] Same rule the standalone AssistantThinking branch uses
+        // (see T300): a forced-reasoning model still streams reasoning_-
+        // content while the user has thinking switched off, so those blocks
+        // must not be folded into a row either — folding one and then
+        // rendering it would RESURFACE content the gate was hiding. When
+        // thinking is off, only tool calls fold and the run's label reflects
+        // that, so the header count always matches what tapping reveals.
+        val thinkingVisible = message.thinkingLevel?.isEnabled ?: true
+        // [local #337] Which blocks fold into the summary row.
+        //
+        // Note this is computed INDEPENDENTLY of `summaryExpanded`. An earlier
+        // cut folded only when collapsed, so tapping the header made
+        // foldableToolIds empty → foldedRun empty → the summary row was never
+        // emitted → the pills came back as standalone rows and the header
+        // vanished with them. Nothing left to tap, so the run could be opened
+        // but never closed again ("能折叠但展不开"). The row is now always
+        // emitted and carries its own expanded flag; the block list behind it
+        // is the same either way.
+        //
+        // THINKING folds too, not just tool_use. Reasoning and tool calls are
+        // one continuous process — a real turn interleaves thinking → tool →
+        // thinking → tool → answer — and folding only the pills left the
+        // Deep Thinking cards sitting between the summary row and the answer,
+        // which is most of the vertical space the feature exists to reclaim.
+        val foldableToolIds: Set<String> = if (!collapseToolRuns) {
             emptySet()
         } else {
             val firstAnswerIdx = blocks.indexOfFirst {
@@ -872,21 +896,30 @@ internal fun buildFlatChatItems(
                 emptySet()
             } else {
                 blocks.take(firstAnswerIdx).filter { b ->
-                    b.kind == "tool_use" && b.toolStatus in TERMINAL_TOOL_STATUSES
+                    when (b.kind) {
+                        // A running tool is the thing the user is watching.
+                        "tool_use" -> b.toolStatus in TERMINAL_TOOL_STATUSES
+                        // Streaming reasoning likewise — it is live output,
+                        // not settled process. Skipped entirely when the user
+                        // has thinking off, so it keeps rendering through the
+                        // gated branch instead.
+                        "thinking" -> thinkingVisible && (!message.isStreaming || b.id != lastBlockId)
+                        else -> false
+                    }
                 }.map { it.id }.toSet()
             }
         }
-        // The folded set is not necessarily contiguous (thinking blocks sit in
-        // between), so gather them in block order and emit ONE summary row at
-        // the position of the LAST member — which is the last thing above the
-        // answer, so the answer moves up into the space the pills gave back.
+        // The folded set is not necessarily contiguous, so gather them in block
+        // order and emit ONE summary row at the position of the LAST member —
+        // which is the last thing above the answer, so the answer moves up into
+        // the space the rows gave back.
         val foldedRun = blocks.filter { it.id in foldableToolIds }
         if (foldedRun.isNotEmpty()) {
             out.add(dedupe(FlatChatItem.AssistantToolSummary(
                 messageId = message.id,
                 blocks = foldedRun,
                 allToolBlocks = toolPillBlocks,
-                expanded = false,
+                expanded = summaryExpanded,
             )))
         }
         val foldedIdSet = foldedRun.map { it.id }.toSet()

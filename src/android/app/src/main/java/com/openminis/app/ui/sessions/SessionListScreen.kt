@@ -2998,17 +2998,30 @@ private fun SessionRow(
             }
             // [local #359] Unread dot, on the icon's TOP-LEFT — the one corner
             // the running ring and the cloud badge do not use, so a session can
-            // be active AND unread AND syncing without any two signals sharing
-            // space. 9dp is below the 8dp minimum touch target on purpose: it
-            // is decoration on an already-tappable row, not a control.
-            if (showUnreadDot) {
+            // be unread AND syncing without any two signals sharing space.
+            // 9dp is below the 8dp minimum touch target on purpose: it is
+            // decoration on an already-tappable row, not a control.
+            //
+            // Suppressed while the session is RUNNING. `updatedAt` advances on
+            // every streamed chunk, so an agentic turn keeps re-arming the dot
+            // the whole time it works — a red "unread" marker on a session the
+            // user is watching happen, then losing it the instant they open
+            // the chat. The dot means "finished while you were elsewhere";
+            // a live turn has nothing to catch the user up on yet. It lights
+            // up on the frame after the work stops.
+            if (shouldShowUnreadDot(showUnreadDot, isActive)) {
                 Box(
                     modifier = Modifier
                         .size(9.dp)
                         .align(Alignment.TopStart)
                         .offset(x = 2.dp, y = 2.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
+                        // [local #359] RED, not the theme primary. Primary is
+                        // also the selection tint and the "you are here"
+                        // accent, so a primary dot read as chrome rather than
+                        // as an alert. Red is reserved for "you missed
+                        // something" everywhere else in the app.
+                        .background(MaterialTheme.colorScheme.error),
                 )
             }
         }
@@ -3103,6 +3116,22 @@ private fun DialogTextFieldFrame(content: @Composable () -> Unit) {
         Box(modifier = Modifier.padding(horizontal = 12.dp)) { content() }
     }
 }
+
+/**
+ * [local #359] Whether the unread dot belongs on this row right now.
+ *
+ * `isUnread` alone is not the answer. `ChatSessionEntity.updatedAt` advances
+ * on every streamed chunk, so an agentic turn keeps re-arming the dot for as
+ * long as it works — the user watched a red "unread" marker appear on a
+ * session they were actively watching, and lose it the instant they opened
+ * the chat. The dot is for work that FINISHED while they were elsewhere;
+ * nothing is finished yet, so nothing to report.
+ *
+ * Extracted as a plain function so the rule is testable without a Compose
+ * runtime — the row's inline `&&` was untestable and therefore unguarded.
+ */
+internal fun shouldShowUnreadDot(isUnread: Boolean, isActive: Boolean): Boolean =
+    isUnread && !isActive
 
 /**
  * Spinning arc overlaid on the session icon while the agent loop is active.
