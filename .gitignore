@@ -1,0 +1,43 @@
+# ── Build output ────────────────────────────────────────────────────────────
+build/
+.gradle/
+*.apk
+*.aar
+*.ap_
+*.dex
+*.o
+*.so
+!src/android/app/src/main/jniLibs/**/*.so
+
+# ── Locally injected secrets ────────────────────────────────────────────────
+# BUILDING.md: these values must never ship. The public mirror only ever
+# carries the .example file.
+src/android/app/provider-customization.properties
+local.properties
+*.jks
+*.keystore
+.env
+.env.*
+
+# ── Build artifacts we EXTRACT from the official release APK ────────────────
+# These are official build outputs, not source. They are large, and
+# redistributing them here would be re-publishing someone else's binary.
+# See README §「依赖资产」for how to obtain them.
+src/android/app/libs/*.aar
+src/android/app/src/main/assets/alpine-minirootfs.tar
+src/android/app/src/main/assets/proot-aarch64
+src/android/app/src/main/assets/dexopt/
+
+# ── Dependencies (git submodules in the upstream tree) ─────────────────────
+deps/ish/
+deps/proot/
+deps/lame-3.100/
+deps/rclone-mobile/
+deps/talloc/
+
+# ── Editors / OS ───────────────────────────────────────────────────────────
+.idea/
+*.iml
+.DS_Store
+*.swp
+mk.sh
