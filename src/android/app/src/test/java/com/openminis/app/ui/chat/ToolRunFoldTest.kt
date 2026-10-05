@@ -101,9 +101,8 @@ class ToolRunFoldTest {
         assertEquals(0, collapsed.count { it is FlatChatItem.AssistantThinking })
 
         // Expanded: the summary row stays, now carrying its block list, and the
-        // renderer draws those blocks inside its own AnimatedVisibility. They
-        // must NOT also appear as standalone rows — the same content would
-        // render twice.
+        // renderer draws those blocks inside its own disclosure. They must NOT
+        // also appear as standalone rows — the same content would render twice.
         assertEquals(1, expanded.count { it is FlatChatItem.AssistantToolSummary })
         assertEquals(
             "expanded content belongs to the summary row, not beside it",
@@ -112,7 +111,7 @@ class ToolRunFoldTest {
         )
         assertEquals(0, expanded.count { it is FlatChatItem.AssistantThinking })
 
-        // The data the renderer's AnimatedVisibility needs is present.
+        // The data the renderer's disclosure needs is present.
         val summary = summaryOf(expanded)!!
         assertEquals(setOf("t1", "c1"), summary.blocks.map { it.id }.toSet())
     }
@@ -319,4 +318,110 @@ class ToolRunFoldTest {
         )))
         assertTrue(items.any { it is FlatChatItem.AssistantInfo })
     }
+
+    // ── Bug 3: narration between steps must fold too ──────────────────────
+
+    @Test
+    fun `narration between steps folds with the run`() {
+        // The reported shape: an agentic turn that talks between every tool.
+        // Cutting at the FIRST text block left everything after that line
+        // unfolded, so the collapsed run still filled the screen.
+        val items = build(assistant(listOf(
+            thinking("t1"),
+            text("n1", "明白，我先看看现在有什么在跑。"),
+            tool("c1"),
+            text("n2", "先停掉这些，再收窄。"),
+            tool("c2"),
+            text("final", "门户 8940 和收件箱 8932 已停，8941 看板还在。"),
+        )))
+        val folded = summaryOf(items)!!.blocks.map { it.id }
+        assertEquals(listOf("t1", "n1", "c1", "n2", "c2"), folded)
+
+        // Only the last text block stays in the open.
+        val openText = items.filterIsInstance<FlatChatItem.AssistantMarkdownBlock>()
+            .map { it.rawText }
+        assertTrue("the answer stays visible", openText.any { it.contains("门户 8940") })
+        assertTrue("narration is not left in the open", openText.none { it.contains("明白，我先看看") })
+        assertTrue("narration is not left in the open", openText.none { it.contains("先停掉这些") })
+    }
+
+    @Test
+    fun `only the LAST text block stays open when several are answers`() {
+        // Three prose paragraphs, no tools and no thinking at all — a plain
+        // reply. Nothing folds: hiding paragraphs of an answer behind a bar
+        // labelled "process" would be a lie.
+        val items = build(assistant(listOf(
+            text("p1", "第一段。"),
+            text("p2", "第二段。"),
+            text("p3", "第三段。"),
+        )))
+        assertEquals(0, items.count { it is FlatChatItem.AssistantToolSummary })
+    }
+
+    @Test
+    fun `a single-paragraph reply with a trailing tool does not fold the prose`() {
+        // One text block, one tool after it. The tool is not process — the
+        // answer came first — so the fold stays empty rather than swallowing
+        // the paragraph.
+        val items = build(assistant(listOf(
+            text("answer", "这是答案。"),
+            tool("c1"),
+        )))
+        assertEquals(0, items.count { it is FlatChatItem.AssistantToolSummary })
+    }
+
+    @Test
+    fun `empty narration between steps is not folded`() {
+        val items = build(assistant(listOf(
+            thinking("t1"), text("n1", ""), tool("c1"), text("x"),
+        )))
+        val folded = summaryOf(items)!!.blocks.map { it.id }
+        assertEquals(listOf("t1", "c1"), folded)
+    }
+
+    @Test
+    fun `options are their own row, not inside a markdown fragment`() {
+        // [local #362] Rendering the buttons inside a markdown item made them
+        // share its measured height, so they were drawn over the next row.
+        val items = buildFlatChatItems(
+            messages = listOf(
+                user("u1", "怎么做？"),
+                ChatMessage(
+                    id = "m1",
+                    role = "assistant",
+                    content = "",
+                    toolBlocks = listOf(
+                        text("x", "两个办法：\n\n1. 走端口换\n2. 走文件换"),
+                    ),
+                ),
+            ),
+        )
+        val opts = items.filterIsInstance<FlatChatItem.AssistantReplyOptions>()
+        assertEquals(1, opts.size)
+        // Its own row → its own key, so LazyColumn gives it a real height.
+        assertEquals("replyopts:m1", opts.first().key)
+        // And the joined reply text reaches the parser whole — the splitter
+        // would otherwise hand it only the last bullet.
+        assertTrue(opts.first().replyText.contains("走端口换"))
+        assertTrue(opts.first().replyText.contains("走文件换"))
+    }
+
+    @Test
+    fun `no options row while the turn is still streaming`() {
+        val items = buildFlatChatItems(
+            messages = listOf(
+                ChatMessage(
+                    id = "m1",
+                    role = "assistant",
+                    content = "",
+                    isStreaming = true,
+                    toolBlocks = listOf(text("x", "1. 甲\n2. 乙")),
+                ),
+            ),
+        )
+        assertEquals(0, items.count { it is FlatChatItem.AssistantReplyOptions })
+    }
+
+    private fun user(id: String, text: String) =
+        ChatMessage(id = id, role = "user", content = text)
 }

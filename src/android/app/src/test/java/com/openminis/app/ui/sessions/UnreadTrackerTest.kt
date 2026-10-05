@@ -102,4 +102,37 @@ class UnreadTrackerTest {
     fun `an untouched empty session that starts running still shows nothing`() {
         assertFalse(show("a", T0, T0, emptyMap(), isActive = true))
     }
+
+    // ── "读了也出现，打开两次才消失" ──────────────────────────────────────
+
+    @Test
+    fun `content written AFTER the read stamp is unread - the fix is not to swallow it`() {
+        // The reported symptom had two possible causes and the fix must not
+        // have traded one for the other. Marking the session read on open is
+        // correct because "now" genuinely covers what the user has seen — but
+        // a reply that lands later is still unread and MUST light up.
+        val openedAt = T0 + 10_000
+        val seen = mapOf("a" to openedAt)
+        assertFalse(show("a", openedAt, T0, seen, isActive = false))
+        assertTrue(show("a", openedAt + 1, T0, seen, isActive = false))
+    }
+
+    @Test
+    fun `a run that finishes while watched leaves no dot`() {
+        // The watermark advances while the session is open, so what it wrote
+        // after the user sat down to watch is not "missed" content.
+        val watchedFrom = T0 + 10_000
+        val seen = mapOf("a" to watchedFrom + 5_000)
+        assertFalse(show("a", watchedFrom + 4_999, T0, seen, isActive = false))
+    }
+
+    @Test
+    fun `isUnread is a pure comparison - the caller owns the watermark`() {
+        // markRead is now called with System.currentTimeMillis() rather than
+        // the row's updatedAt, so the tracker itself must stay a dumb
+        // comparison: if it second-guessed the stamp here, the "open = read"
+        // rule could not live in the call site.
+        assertFalse(UnreadTracker.isUnread("a", T0 + 5000, T0, mapOf("a" to T0 + 5000)))
+        assertTrue(UnreadTracker.isUnread("a", T0 + 5001, T0, mapOf("a" to T0 + 5000)))
+    }
 }

@@ -4029,6 +4029,9 @@ fun ChatScreen(
                     // [local #337] Part of the message's own turn, so it
                     // grays with everything else in that message.
                     is FlatChatItem.AssistantToolSummary -> grayedMap[originalMessageId(messageId)] == true
+                    // [local #362] Part of the message's own turn, so it grays
+                    // with everything else in that message.
+                    is FlatChatItem.AssistantReplyOptions -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantInfo -> false  // system rows never grayed
                     is FlatChatItem.AssistantTyping -> false
                     is FlatChatItem.AssistantError -> grayedMap[originalMessageId(messageId)] == true
@@ -4047,21 +4050,13 @@ fun ChatScreen(
                 // with a 3-button popup (Copy / Copy Markdown / Copy Rich
                 // Text); the latter two read from the bounds registry which
                 // each AssistantMessageView updates via onGloballyPositioned.
-                // [local #362] messageId -> index of its LAST markdown
-                // fragment. The options row is only allowed under that
-                // fragment, so a closing choice list grows buttons exactly
-                // once per turn. Computed from the SAME flatItems the
-                // LazyColumn renders, so it cannot drift out of sync with the
-                // flattener's own fragment coalescing.
-                val lastFragmentOf: Map<String, Int> = remember(flatItems) {
-                    buildMap {
-                        flatItems.forEach { row ->
-                            if (row is FlatChatItem.AssistantMarkdownBlock) {
-                                put(row.messageId, row.blockIndex)
-                            }
-                        }
-                    }
-                }
+                // [local #362] The options row used to be gated on
+                // `messageId -> last fragment index`, a map derived here. It is
+                // gone: the buttons are now their own FlatChatItem emitted by
+                // the builder after the turn's last fragment, so no
+                // cross-row index map is needed to place them — and the map's
+                // "last writer wins" over flatItems was itself the bug (it
+                // could name a fragment the fold had just relocated).
                 val messageBounds = remember { MessageBoundsRegistry() }
                 // [T-selection-add-to-input] Toolbar's "Add to Chat Input"
                 // action funnels the selected substring back into the
@@ -4575,25 +4570,14 @@ fun ChatScreen(
                                             shardId = "mdblock:${item.parentBlockId}:${item.blockIndex}",
                                         ),
                                     )
-                                    // [local #362] Tappable options. Only on the
-                                    // LAST fragment of the LAST text block of a
-                                    // finished turn — that is the only place a
-                                    // closing choice list can live, and gating on
-                                    // it keeps a mid-answer numbered list from
-                                    // growing buttons. Tapping fills the composer
-                                    // (a second tap sends); it never sends on its
-                                    // own, so an accidental pick is recoverable.
-                                    if (!item.isStreaming &&
-                                        item.isLastBlockOfMessage &&
-                                        item.blockIndex == lastFragmentOf[originalMessageId(item.messageId)]
-                                    ) {
-                                        ReplyOptionsRow(
-                                            messageId = item.messageId,
-                                            replyText = item.rawText,
-                                            enabled = true,
-                                            onPick = { viewModel.setInputText(it) },
-                                        )
-                                    }
+                                    // [local #362] Moved OUT of this row and into its own
+                                    // FlatChatItem (AssistantReplyOptions). See
+                                    // that class: rendering the buttons inside a
+                                    // markdown item meant they shared its
+                                    // measured height, so any row whose height
+                                    // was computed from the markdown alone
+                                    // reserved too little and the buttons were
+                                    // drawn over whatever came next.
                                 }
                             }
                             is FlatChatItem.AssistantThinking -> {
@@ -4778,6 +4762,17 @@ fun ChatScreen(
                                 } else null,
                             )
                             is FlatChatItem.AssistantTyping -> TypingIndicator()
+                            // [local #362] Closing choice list. Its own LazyColumn
+                            // row, so its height is measured for it and nothing
+                            // can be drawn underneath. Tapping fills the
+                            // composer (a second tap sends) — it never sends on
+                            // its own, so an accidental pick is recoverable.
+                            is FlatChatItem.AssistantReplyOptions -> ReplyOptionsRow(
+                                messageId = originalMessageId(item.messageId),
+                                replyText = item.replyText,
+                                enabled = true,
+                                onPick = { viewModel.setInputText(it) },
+                            )
                             // [T-android-usage-capsule-time] Same composable the
                             // classic renderer uses, so the two paths cannot drift.
                             // [T-android-usage-capsule-style] Hidden until the

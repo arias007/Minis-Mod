@@ -1468,6 +1468,11 @@ internal fun HelperTranscript(
                     else ToolCallPill(item.block, allToolBlocks = item.allToolBlocks, onOpenDetail = onOpenDetail)
                 is FlatChatItem.AssistantInfo -> FallbackInfoBlock(item.block)
                 is FlatChatItem.AssistantTyping -> TypingIndicator()
+                // [local #362] The closing choice list belongs to the chat the
+                // user is typing into. This transcript is read-only and has no
+                // composer, so tapping an option here would have nowhere to go —
+                // render nothing rather than a dead button.
+                is FlatChatItem.AssistantReplyOptions -> Unit
                 is FlatChatItem.AssistantError -> InlineErrorBanner(item.error)
                 is FlatChatItem.AssistantUsage -> {
                     // Strip the "#n" the flattener appends to keep duplicate

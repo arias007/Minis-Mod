@@ -1,10 +1,5 @@
 package com.openminis.app.ui.chat
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -30,26 +25,28 @@ import androidx.compose.ui.unit.sp
 import com.openminis.app.ui.theme.ChatColors
 
 /**
- * [local #337] One row standing in for a run of finished process — reasoning and
- * tool calls together — plus the individual rows themselves when the user taps
- * it open.
+ * [local #337] One row standing in for a finished run of process — reasoning,
+ * tool calls and the narration between them — plus those rows themselves when
+ * the user taps it open.
  *
- * The point is vertical: an agentic turn emits a Deep Thinking card per
- * reasoning step and a pill per tool call before its final answer, and every
- * one of them occupies a row in the transcript. Replacing a settled run with a
- * single line keeps the answer where the reader expects to find it, and one tap
- * brings the whole run back.
+ * The point is vertical: an agentic turn emits a Deep Thinking card, a pill,
+ * and a one-line narration, then the next one, dozens of times before its final
+ * answer. Every one occupies a row. Replacing a settled run with a single line
+ * keeps the answer where the reader expects to find it.
  *
  * The run's own state is never hidden — the header names how many calls folded
- * and how many of them failed, so a collapsed run still reads as a summary
- * rather than a gap.
+ * and how many failed, so a collapsed run still reads as a summary rather than
+ * a gap.
  *
- * [local #337] Both kinds fold. A real turn interleaves thinking → tool →
- * thinking → tool → answer, so folding only the pills left the reasoning cards
- * stranded between this row and the answer — which is most of the vertical space
- * the feature exists to reclaim. They render through the same ThinkingBlock the
- * standalone path uses, so a folded block still opens, still shows its token
- * count, and still obeys the user's Appearance setting.
+ * [local #337] NO HEIGHT ANIMATION on expand. The first cut used
+ * `AnimatedVisibility(expandVertically)`, and a run can be dozens of pills:
+ * every frame re-measured all of them, so opening a long run took visibly
+ * longer than it should and felt like the tap had missed ("展开折叠不灵敏
+ * 卡顿"). Worse, the animation was interrupted by the LazyColumn's own
+ * scroll anchoring, which is what produced the "有时展不开" — the row started
+ * animating, the list re-anchored, and the animation landed on a stale
+ * geometry. The content now appears in one frame. It is a disclosure, not an
+ * animation, and the tap registers immediately either way.
  */
 @Composable
 internal fun ToolRunSummaryRow(
@@ -61,29 +58,26 @@ internal fun ToolRunSummaryRow(
 ) {
     val tools = blocks.filter { it.kind == "tool_use" }
     val thinkingBlocks = blocks.filter { it.kind == "thinking" }
+    val narrationBlocks = blocks.filter { it.kind == "text" && it.content.isNotEmpty() }
     val failed = tools.count {
         it.toolStatus == ToolBlockStatus.FAILED || it.toolStatus == ToolBlockStatus.CANCELLED
     }
 
-    // What the header calls itself. With reasoning folded in, "7 tool calls"
-    // understated the row — the thought blocks are the bulk of it. Report the
-    // two kinds separately so the number matches what tapping reveals.
-    val label = buildString {
-        if (thinkingBlocks.isNotEmpty()) {
-            append(thinkingBlocks.size)
-            append(if (thinkingBlocks.size == 1) " thinking block" else " thinking blocks")
-        }
-        if (tools.isNotEmpty()) {
-            if (isNotEmpty()) append(" · ")
-            append(tools.size)
-            append(if (tools.size == 1) " tool call" else " tool calls")
-        }
-        if (failed > 0) {
-            append(" · ")
-            append(failed)
-            append(if (failed == 1) " failed" else " failed")
-        }
+    // What the header calls itself. With reasoning and narration folded in,
+    // "7 tool calls" understated the row — the header has to match what tapping
+    // reveals, or the count reads as a lie.
+    val parts = mutableListOf<String>()
+    if (thinkingBlocks.isNotEmpty()) {
+        parts += "${thinkingBlocks.size} thinking block" + if (thinkingBlocks.size == 1) "" else "s"
     }
+    if (tools.isNotEmpty()) {
+        parts += "${tools.size} tool call" + if (tools.size == 1) "" else "s"
+    }
+    if (narrationBlocks.isNotEmpty()) {
+        parts += "${narrationBlocks.size} note" + if (narrationBlocks.size == 1) "" else "s"
+    }
+    if (failed > 0) parts += "$failed failed"
+    val label = parts.joinToString(" · ")
 
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Row(
@@ -115,14 +109,12 @@ internal fun ToolRunSummaryRow(
             )
         }
 
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
-        ) {
+        // Plain `if`, not AnimatedVisibility — see the KDoc. One frame, no
+        // per-frame re-measure of a run that can be dozens of rows.
+        if (expanded) {
             Column(modifier = Modifier.padding(top = 4.dp)) {
-                // Block order, not kind order — a folded run is a transcript
-                // and interleaving IS the record of how the agent worked.
+                // Block order, not kind order — a folded run is a transcript and
+                // the interleaving IS the record of how the agent worked.
                 blocks.forEach { b ->
                     when (b.kind) {
                         "tool_use" -> ToolCallPill(
@@ -134,11 +126,23 @@ internal fun ToolRunSummaryRow(
                         "thinking" -> ThinkingBlock(
                             block = b,
                             // A folded block is settled by construction — the
-                            // builder never folds the live trailing one — so
-                            // isStreaming is false here regardless.
+                            // builder never folds the live trailing one.
                             isStreaming = false,
                             isLast = false,
                         )
+                        // Narration between steps. Rendered as plain text, not
+                        // full markdown: these are one-liners, and pulling the
+                        // markdown renderer in here would let a stray fence or
+                        // table inside a folded note blow up the row.
+                        "text" -> if (b.content.isNotEmpty()) {
+                            Text(
+                                text = b.content,
+                                fontSize = 13.sp,
+                                lineHeight = 19.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 3.dp),
+                            )
+                        }
                     }
                 }
             }

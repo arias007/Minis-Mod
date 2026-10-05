@@ -516,6 +516,35 @@ internal sealed class FlatChatItem {
         override val contentType = "typing"
     }
 
+    /**
+     * [local #362] The closing choice list of a finished turn, as its OWN row.
+     *
+     * It used to be rendered INSIDE the last markdown fragment's item, which
+     * is what made the buttons overlap the text around them. That row's
+     * measured height is what the LazyColumn reserves for it, and the buttons
+     * were appended after the markdown inside the same content lambda — so any
+     * row whose height was computed from the markdown alone (a fragment the
+     * folding pass had just relocated, a guard that short-circuited) reserved
+     * too little and the buttons were drawn over whatever came next.
+     *
+     * As a separate item the buttons get their own measured height and their
+     * own key. Nothing can overlap them, and re-flattening after a fold cannot
+     * leave them attached to the wrong fragment.
+     */
+    class AssistantReplyOptions(
+        val messageId: String,
+        val replyText: String,
+    ) : FlatChatItem() {
+        override val key = "replyopts:$messageId"
+        override val contentType = "replyOptions"
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is AssistantReplyOptions) return false
+            return messageId == other.messageId && replyText == other.replyText
+        }
+        override fun hashCode(): Int = 31 * messageId.hashCode() + replyText.hashCode()
+    }
+
     data class AssistantError(val messageId: String, val error: String) : FlatChatItem() {
         override val key = "error:$messageId"
         override val contentType = "error"
@@ -663,6 +692,12 @@ private val TERMINAL_TOOL_STATUSES = setOf(
     ToolBlockStatus.TIMEOUT,
 )
 
+/**
+ * [local #337] Block kinds that make a row PROCESS rather than answer. A turn
+ * made only of these plus text is a plain reply, and must not fold.
+ */
+private val TOOL_SHAPED_KINDS = setOf("thinking", "tool_use")
+
 internal fun buildFlatChatItems(
     messages: List<ChatMessage>,
     // [T-android-perf-logging] Optional — when supplied, emit a progress
@@ -727,6 +762,10 @@ internal fun buildFlatChatItems(
                 expanded = item.expanded,
             )
             is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")
+            is FlatChatItem.AssistantReplyOptions -> FlatChatItem.AssistantReplyOptions(
+                messageId = "${item.messageId}#$n",
+                replyText = item.replyText,
+            )
             is FlatChatItem.AssistantError -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantUsage -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantLegacyContent -> FlatChatItem.AssistantLegacyContent(
@@ -885,35 +924,58 @@ internal fun buildFlatChatItems(
         // thinking → tool → answer — and folding only the pills left the
         // Deep Thinking cards sitting between the summary row and the answer,
         // which is most of the vertical space the feature exists to reclaim.
-        val foldableToolIds: Set<String> = if (!collapseToolRuns) {
+        // Everything before the LAST non-empty text block is process; that block is
+        // the answer.
+        //
+        // The first cut cut at the FIRST non-empty text instead, which is
+        // wrong for exactly the turns this feature exists for. An agentic turn
+        // narrates: thinking → "明白，我先看看" → tool → "停掉这些" → tool →
+        // "好了" → … → the real answer. That first one-line narration IS a
+        // non-empty text block, so it became the boundary and every tool after
+        // it sat outside the fold — the user saw the summary bar up top with
+        // the whole run still scattered below it ("过程有不是最终回答的文字
+        // 没被折叠断掉了"). Cutting at the LAST text block puts the entire run
+        // on the process side of the line.
+        val processIds: Set<String> = if (!collapseToolRuns) {
             emptySet()
         } else {
-            val firstAnswerIdx = blocks.indexOfFirst {
-                it.kind == "text" && it.content.isNotEmpty()
-            }
+            val answerIdx = blocks.indexOfLast { it.kind == "text" && it.content.isNotEmpty() }
             // No answer text at all → the turn is still working; leave it alone.
-            if (firstAnswerIdx < 0) {
+            if (answerIdx < 0) {
                 emptySet()
             } else {
-                blocks.take(firstAnswerIdx).filter { b ->
+                val candidates = blocks.take(answerIdx).filter { b ->
                     when (b.kind) {
                         // A running tool is the thing the user is watching.
                         "tool_use" -> b.toolStatus in TERMINAL_TOOL_STATUSES
-                        // Streaming reasoning likewise — it is live output,
-                        // not settled process. Skipped entirely when the user
-                        // has thinking off, so it keeps rendering through the
-                        // gated branch instead.
+                        // Streaming reasoning likewise — it is live output, not
+                        // settled process. Skipped when thinking is off, so it
+                        // keeps rendering through the gated branch instead.
                         "thinking" -> thinkingVisible && (!message.isStreaming || b.id != lastBlockId)
+                        // Narration BETWEEN steps folds too. It is process
+                        // narration ("先停掉再收窄"), not the answer, and
+                        // leaving it open is what made a folded run still read
+                        // as twenty rows.
+                        "text" -> b.content.isNotEmpty()
                         else -> false
                     }
                 }.map { it.id }.toSet()
+                // A reply with no thinking and no tools is prose, not process:
+                // two text blocks there are two paragraphs of ONE answer, and
+                // folding the first would hide half the reply behind a bar that
+                // says "process". Require at least one tool-shaped or
+                // reasoning block before anything folds.
+                val hasToolShaped = candidates.any { id ->
+                    blocks.firstOrNull { it.id == id }?.kind in TOOL_SHAPED_KINDS
+                }
+                if (hasToolShaped) candidates else emptySet()
             }
         }
         // The folded set is not necessarily contiguous, so gather them in block
         // order and emit ONE summary row at the position of the LAST member —
         // which is the last thing above the answer, so the answer moves up into
         // the space the rows gave back.
-        val foldedRun = blocks.filter { it.id in foldableToolIds }
+        val foldedRun = blocks.filter { it.id in processIds }
         if (foldedRun.isNotEmpty()) {
             out.add(dedupe(FlatChatItem.AssistantToolSummary(
                 messageId = message.id,
@@ -1066,6 +1128,28 @@ internal fun buildFlatChatItems(
                     block = block,
                     allToolBlocks = toolPillBlocks,
                     isLastCancelled = block.id == lastCancelledToolId,
+                )))
+            }
+        }
+
+        // [local #362] Closing choice list, as its own row AFTER the turn's
+        // last markdown fragment.
+        //
+        // Only on a FINISHED turn, and only when the whole reply parses as a
+        // closing option run — ReplyOptions enforces the tail/contiguity/2..4
+        // rules, so a mid-answer numbered example cannot manufacture buttons.
+        // The reply text handed over is the JOINED markdown of the turn, not
+        // one fragment: the splitter cuts a list across fragment boundaries, so
+        // the last fragment alone is usually just the final bullet and the
+        // parser would see one option and give up.
+        if (!message.isStreaming) {
+            val lastText = blocks.lastOrNull { it.kind == "text" && it.content.isNotEmpty() }
+            if (lastText != null) {
+                out.add(dedupe(FlatChatItem.AssistantReplyOptions(
+                    messageId = message.id,
+                    replyText = blocks
+                        .filter { it.kind == "text" && it.content.isNotEmpty() }
+                        .joinToString("\n\n") { it.content },
                 )))
             }
         }

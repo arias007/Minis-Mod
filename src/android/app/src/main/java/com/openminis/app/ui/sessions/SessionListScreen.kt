@@ -639,13 +639,40 @@ fun SessionListScreen(
     // session is still interrupted. Clearing here just caused a flicker.
     val onSessionClickGuarded: (String) -> Unit = { id ->
         exitSearchIfQueryBlank()
-        // [local #359] Opening a session is what makes it read. The stamp is
-        // taken from the row the user tapped, so anything already in the list
-        // is covered even if the entity changed underneath us.
-        sessions.firstOrNull { it.id == id }?.let { s ->
-            UnreadTracker.markRead(context, s.id, s.updatedAt)
-        }
+        // [local #359] Opening a session is what makes it read.
+        //
+        // The stamp is now "now", not the row's `updatedAt`. Opening a session
+        // usually means you are about to WATCH it finish, and an agentic turn
+        // keeps bumping `updatedAt` for as long as it runs. Stamping the
+        // row's stale value meant everything the run wrote after you opened it
+        // counted as unread — so the dot came back on the way out and the user
+        // had to open the session a second time to clear it ("读了也会出现，
+        // 打开读两次才会消失"). Marking the present says exactly what it means:
+        // "you have seen everything up to right now", which is true, and
+        // anything written after this moment genuinely is unread.
+        UnreadTracker.markRead(context, id, System.currentTimeMillis())
         onSessionClick(id)
+    }
+    // [local #359] Keep the watermark moving while the user is actually
+    // watching. A run that finishes while they sit in the chat wrote content
+    // they have seen; without this the dot is waiting for them the moment they
+    // go back. Cheap: one SharedPreferences write per state tick, and only
+    // while a session is actually running.
+    // [local #359] While a session runs, keep advancing its read watermark.
+    // `activeSessions` is collected here rather than reusing the list's own
+    // `activeSessionIds` (declared further down, after this scope) — the two
+    // would otherwise be order-dependent, and this one has to be live at the
+    // moment the user taps a row.
+    val runningSessionIds by remember {
+        SessionActivityTracker.activeSessions
+    }.collectAsState()
+    LaunchedEffect(runningSessionIds, sessions) {
+        runningSessionIds.forEach { activeId ->
+            val row = sessions.firstOrNull { it.id == activeId } ?: return@forEach
+            if (row.updatedAt > (UnreadTracker.lastReadMap.value[activeId] ?: 0L)) {
+                UnreadTracker.markRead(context, activeId, System.currentTimeMillis())
+            }
+        }
     }
     val onNewChatGuarded: (String) -> Unit = { id -> exitSearchIfQueryBlank(); onNewChat(id) }
 
@@ -3016,12 +3043,17 @@ private fun SessionRow(
                         .align(Alignment.TopStart)
                         .offset(x = 2.dp, y = 2.dp)
                         .clip(CircleShape)
-                        // [local #359] RED, not the theme primary. Primary is
-                        // also the selection tint and the "you are here"
-                        // accent, so a primary dot read as chrome rather than
-                        // as an alert. Red is reserved for "you missed
-                        // something" everywhere else in the app.
-                        .background(MaterialTheme.colorScheme.error),
+                        // [local #359] A fixed red, not a theme token.
+                        // `colorScheme.error` is Material's DYNAMIC role: on
+                        // devices with a themed wallpaper it resolves to that
+                        // wallpaper's accent, which on this phone came out
+                        // orange — a red dot the user reported as "橙色"
+                        // because it plainly was. The unread marker has one
+                        // meaning ("you missed something"), so it gets one
+                        // literal colour rather than a role that follows the
+                        // OS. Matches the delete-action red used elsewhere in
+                        // the session list.
+                        .background(Color(0xFFE5484D)),
                 )
             }
         }
